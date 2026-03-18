@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Backrooms - Multiplayer V3 (Monster Update)</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; color: #ffaa00; user-select: none; }
+        #menu { position: absolute; width: 100%; height: 100%; background: radial-gradient(circle, #1a1a05 0%, #000 100%); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 2000; }
+        .menu-content { text-align: center; background: rgba(0,0,0,0.8); padding: 40px; border: 2px solid #ffaa00; border-radius: 15px; }
+        .btn { display: block; width: 280px; padding: 12px; margin: 10px auto; font-size: 16px; background: transparent; border: 2px solid #ffaa00; color: #ffaa00; font-weight: bold; cursor: pointer; transition: 0.3s; }
+        .btn:hover { background: #ffaa00; color: #000; box-shadow: 0 0 15px #ffaa00; }
+        #multi-box { display: none; margin-top: 20px; padding-top: 20px; border-top: 1px dashed #555; }
+        input { background: #111; border: 1px solid #ffaa00; color: #fff; padding: 10px; text-align: center; font-size: 18px; width: 200px; margin-bottom: 10px; }
+        #blocker { position: absolute; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: none; justify-content: center; align-items: center; z-index: 999; color: #fff; cursor: pointer; }
+        #ui { position: absolute; top: 20px; left: 20px; font-size: 24px; font-weight: bold; z-index: 10; text-shadow: 2px 2px 0 #000; }
+        #stamina { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: 300px; height: 15px; border: 2px solid #444; background: rgba(0,0,0,0.5); }
+        #stamina-fill { width: 100%; height: 100%; background: #ffcc00; transition: width 0.1s; }
+        #interaction { position: absolute; top: 55%; left: 50%; transform: translateX(-50%); font-size: 20px; color: #fff; display: none; background: rgba(0,0,0,0.5); padding: 5px 10px; border-radius: 5px; }
+        #win-screen { position: absolute; width: 100%; height: 100%; background: #fff; color: #000; display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 3000; }
+        #jumpscare { position: absolute; width:100%; height:100%; background:red; display:none; z-index:4000; justify-content:center; align-items:center; color:black; font-size:100px; font-weight:bold; }
+    </style>
+</head>
+<body>
+
+<div id="jumpscare">YAKALANDIN!</div>
+
+<div id="menu">
+    <div class="menu-content">
+        <h1 style="letter-spacing: 8px; margin-bottom: 30px;">BACKROOMS</h1>
+        <div id="main-btns">
+            <button class="btn" onclick="initGame('normal')">NORMAL MOD</button>
+            <button class="btn" style="border-color:#ff4400; color:#ff4400" onclick="initGame('kabus')">KABUS MODU</button>
+            <button class="btn" style="border-color:#00aaff; color:#00aaff" onclick="openMultiplayer()">MULTIPLAYER</button>
+        </div>
+        <div id="multi-box">
+            <p style="color: #00aaff;">SENİN ODA KODUN: <br><b id="my-id" style="font-size: 24px;">BAĞLANIYOR...</b></p>
+            <input type="text" id="friend-id" placeholder="ARKADAŞININ KODU">
+            <button class="btn" style="border-color:#00ff88; color:#00ff88" onclick="initGame('multiplayer')">ODAYA KATIL VE BAŞLA</button>
+            <button class="btn" style="font-size: 12px; width: 100px; border:none;" onclick="location.reload()">GERİ</button>
+        </div>
+    </div>
+</div>
+
+<div id="blocker"><h1>[ TIKLA VE GİR ]</h1></div>
+<div id="ui">Çipler: 0 / 20</div>
+<div id="interaction">[E] ETKİLEŞİM</div>
+<div id="stamina"><div id="stamina-fill"></div></div>
+
+<div id="win-screen">
+    <h1 style="font-size: 60px;">KAÇTIN!</h1>
+    <p>Asansörü buldun ve Backrooms'dan kurtuldun.</p>
+    <button class="btn" style="border-color:#000; color:#000; margin-top: 30px;" onclick="location.reload()">TEKRAR OYNA</button>
+</div>
+
+<script type="module">
+    import * as THREE from 'https://cdn.skypack.dev/three@0.132.2';
+    import { PointerLockControls } from 'https://cdn.skypack.dev/three@0.132.2/examples/jsm/controls/PointerLockControls.js';
+
+    let peer, conn, friendModel;
+    let scene, camera, renderer, controls, torch;
+    let gameMode = 'normal';
+    let walls = [], chips = [], elevator;
+    let score = 0, stamina = 100;
+    let isWon = false;
+
+    // CANAVAR DEĞİŞKENLERİ
+    let monster, monsterLight;
+    let isMonsterActive = false;
+    let monsterTimer = 0;
+    let monsterSpawnCooldown = 25; // 25 saniye
+
+    window.openMultiplayer = () => {
+        document.getElementById('main-btns').style.display = 'none';
+        document.getElementById('multi-box').style.display = 'block';
+        const shortID = Math.floor(10000 + Math.random() * 90000).toString();
+        peer = new Peer(shortID); 
+        peer.on('open', (id) => document.getElementById('my-id').innerText = id);
+        peer.on('connection', (c) => { conn = c; setupDataListener(); });
+    };
+
+    function setupDataListener() {
+        conn.on('data', (data) => {
+            if(data.type === 'move' && friendModel) {
+                friendModel.position.set(data.x, 1.4, data.z);
+                friendModel.rotation.y = data.ry;
+            }
+            // Ortak Çip Toplama
+            if(data.type === 'chipCollect') {
+                const collectedChip = chips[data.index];
+                if(collectedChip && collectedChip.visible) {
+                    collectedChip.visible = false;
+                    score++;
+                    updateUI();
+                }
+            }
+        });
+    }
+
+    function updateUI() {
+        document.getElementById('ui').innerText = `Çipler: ${score} / 20`;
+    }
+
+    window.initGame = (mode) => {
+        gameMode = mode;
+        const targetID = document.getElementById('friend-id').value;
+        if(mode === 'multiplayer' && targetID) {
+            conn = peer.connect(targetID);
+            setupDataListener();
+        }
+        document.getElementById('menu').style.display = 'none';
+        document.getElementById('blocker').style.display = 'flex';
+        startEngine();
+    };
+
+    function startEngine() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        renderer = new THREE.WebGLRenderer({antialias: true});
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        controls = new PointerLockControls(camera, document.body);
+        document.getElementById('blocker').addEventListener('click', () => { if(!isWon) controls.lock(); });
+        controls.addEventListener('lock', () => document.getElementById('blocker').style.display = 'none');
+        controls.addEventListener('unlock', () => { if(!isWon) document.getElementById('blocker').style.display = 'flex'; });
+
+        scene.fog = new THREE.Fog(0x0a0a05, 1, (gameMode === 'kabus' ? 8 : 15));
+        scene.add(new THREE.AmbientLight(0xffffff, 0.1));
+        
+        torch = new THREE.SpotLight(0xfff0aa, 2, 15, Math.PI/6, 0.5, 1);
+        camera.add(torch);
+        camera.add(torch.target);
+        torch.target.position.set(0, 0, -1);
+        scene.add(camera);
+
+        // Canavar Oluşturma
+        const mGeo = new THREE.BoxGeometry(1, 3, 1);
+        const mMat = new THREE.MeshBasicMaterial({color: 0xff0000});
+        monster = new THREE.Mesh(mGeo, mMat);
+        monster.position.y = -10; // Başlangıçta yer altında
+        scene.add(monster);
+
+        monsterLight = new THREE.PointLight(0xff0000, 0, 10);
+        monster.add(monsterLight);
+
+        if(gameMode === 'multiplayer') {
+            const geo = new THREE.BoxGeometry(0.6, 2.8, 0.6);
+            const mat = new THREE.MeshStandardMaterial({color: 0x00aaff, emissive: 0x0044ff});
+            friendModel = new THREE.Mesh(geo, mat);
+            scene.add(friendModel);
+        }
+
+        const floor = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.MeshStandardMaterial({color: 0x443311}));
+        floor.rotation.x = -Math.PI/2; scene.add(floor);
+        const ceil = new THREE.Mesh(new THREE.PlaneGeometry(100, 100), new THREE.MeshStandardMaterial({color: 0x222222}));
+        ceil.rotation.x = Math.PI/2; ceil.position.y = 3.5; scene.add(ceil);
+
+        const wallMat = new THREE.MeshStandardMaterial({color: 0xccaa44});
+        function addWall(w, h, d, x, z, r=0) {
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), wallMat);
+            wall.position.set(x, h/2, z);
+            wall.rotation.y = r;
+            scene.add(wall);
+            walls.push(wall);
+        }
+
+        addWall(100, 4, 1, 0, 50); addWall(100, 4, 1, 0, -50);
+        addWall(1, 4, 100, 50, 0); addWall(1, 4, 100, -50, 0);
+        for(let i=0; i<80; i++) {
+            addWall(5, 3.5, 0.8, (Math.random()-0.5)*90, (Math.random()-0.5)*90, Math.random()>0.5?Math.PI/2:0);
+        }
+
+        for(let i=0; i<20; i++) {
+            const chip = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.05, 8, 12), new THREE.MeshStandardMaterial({color: 0xffff00, emissive: 0x555500}));
+            chip.position.set((Math.random()-0.5)*80, 0.5, (Math.random()-0.5)*80);
+            scene.add(chip);
+            chips.push(chip);
+        }
+
+        elevator = new THREE.Mesh(new THREE.BoxGeometry(3, 3.5, 3), new THREE.MeshStandardMaterial({color: 0x555555, metalness: 0.8}));
+        elevator.position.set(45, 1.75, 45);
+        scene.add(elevator);
+        walls.push(elevator);
+
+        animate();
+    }
+
+    let keys = {};
+    const raycaster = new THREE.Raycaster();
+    
+    document.addEventListener('keydown', (e) => {
+        keys[e.code] = true;
+        if(e.code === 'KeyE' && controls.isLocked) {
+            raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+            const chipHits = raycaster.intersectObjects(chips);
+            if(chipHits.length > 0 && chipHits[0].distance < 3 && chipHits[0].object.visible) {
+                const index = chips.indexOf(chipHits[0].object);
+                chipHits[0].object.visible = false;
+                score++;
+                updateUI();
+                if(conn && conn.open) conn.send({ type: 'chipCollect', index: index });
+            }
+            const eleHits = raycaster.intersectObject(elevator);
+            if(eleHits.length > 0 && eleHits[0].distance < 4 && score >= 20) {
+                isWon = true; controls.unlock();
+                document.getElementById('win-screen').style.display = 'flex';
+            }
+        }
+    });
+    document.addEventListener('keyup', (e) => keys[e.code] = false);
+
+    const clock = new THREE.Clock();
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const dt = clock.getDelta();
+
+        if(controls.isLocked && !isWon) {
+            // CANAVAR MANTIĞI
+            monsterTimer += dt;
+            
+            // Her 25 saniyede bir canavar çıkar
+            if(!isMonsterActive && monsterTimer >= monsterSpawnCooldown) {
+                isMonsterActive = true;
+                monsterTimer = 0;
+                // Oyuncunun arkasında bir yerde spawn et
+                monster.position.set(camera.position.x - 10, 1.5, camera.position.z - 10);
+                monsterLight.intensity = 5;
+            }
+
+            if(isMonsterActive) {
+                // 10 saniye takip et
+                if(monsterTimer < 10) {
+                    const moveSpeed = 4.5 * dt;
+                    monster.lookAt(camera.position);
+                    monster.translateZ(moveSpeed);
+                    
+                    // Ekran Titremesi (Screen Shake)
+                    camera.position.x += (Math.random() - 0.5) * 0.15;
+                    camera.position.y += (Math.random() - 0.5) * 0.15;
+
+                    // Yakalanma Kontrolü
+                    if(monster.position.distanceTo(camera.position) < 1.5) {
+                        document.getElementById('jumpscare').style.display = 'flex';
+                        setTimeout(() => location.reload(), 1000);
+                    }
+                } else {
+                    // Süre bitti, canavar kaybolsun
+                    isMonsterActive = false;
+                    monsterTimer = 0;
+                    monster.position.y = -10;
+                    monsterLight.intensity = 0;
+                }
+            }
+
+            const isRunning = keys['ShiftLeft'] && stamina > 0;
+            const speed = (isRunning ? 8 : 3.5) * dt;
+            if(isRunning && (keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD'])) stamina -= 30 * dt;
+            else if(stamina < 100) stamina += 15 * dt;
+            document.getElementById('stamina-fill').style.width = stamina + "%";
+
+            const oldPos = camera.position.clone();
+            if(keys['KeyW']) controls.moveForward(speed);
+            if(keys['KeyS']) controls.moveForward(-speed);
+            if(keys['KeyA']) controls.moveRight(-speed);
+            if(keys['KeyD']) controls.moveRight(speed);
+            camera.position.y = 1.6;
+
+            const pBox = new THREE.Box3().setFromCenterAndSize(camera.position, new THREE.Vector3(0.5, 2, 0.5));
+            for(let w of walls) {
+                if(pBox.intersectsBox(new THREE.Box3().setFromObject(w))) {
+                    camera.position.copy(oldPos);
+                    break;
+                }
+            }
+
+            // Etkileşim UI
+            raycaster.setFromCamera(new THREE.Vector2(0,0), camera);
+            const chipHits = raycaster.intersectObjects(chips);
+            const eleHits = raycaster.intersectObject(elevator);
+            let interText = "";
+            if(chipHits.length > 0 && chipHits[0].distance < 3 && chipHits[0].object.visible) interText = "[E] ÇİPİ AL";
+            else if(eleHits.length > 0 && eleHits[0].distance < 4) interText = score >= 20 ? "[E] KAÇIŞ" : "20 ÇİP LAZIM!";
+            const interUI = document.getElementById('interaction');
+            if(interText) { interUI.innerText = interText; interUI.style.display = 'block'; }
+            else interUI.style.display = 'none';
+
+            if(conn && conn.open) conn.send({ type: 'move', x: camera.position.x, z: camera.position.z, ry: camera.rotation.y });
+        }
+        
+        for(let c of chips) { if(c.visible) c.rotation.y += 0.05; }
+        renderer.render(scene, camera);
+    }
+</script>
+</body>
+</html>
